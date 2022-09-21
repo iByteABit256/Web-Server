@@ -2,7 +2,7 @@ use std::{thread, sync::{mpsc, Mutex, Arc}};
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: mpsc::Sender<Job>
+    sender: Option<mpsc::Sender<Job>>,
 }
 
 #[derive(Debug)]
@@ -43,7 +43,7 @@ impl ThreadPool {
                 workers.push(Worker::new(id, Arc::clone(&receiver)));
             }
 
-            Ok( ThreadPool { workers, sender } )
+            Ok( ThreadPool { workers, sender: Some(sender) } )
         } else {
             Err( PoolCreationError::InvalidNumberOfThreads )
         }
@@ -59,26 +59,46 @@ impl ThreadPool {
     {
         let job = Box::new(f);
 
-        self.sender.send(job).unwrap();
+        self.sender.as_ref().unwrap().send(job).unwrap();
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in &mut self.workers {
+            println!("Shutting down worker {}", worker.id);
+
+            if let Some(thread) = worker.thread.take(){
+                thread.join().unwrap();
+            }
+        }
     }
 }
 
 struct Worker {
     id: usize,
-    thread: thread::JoinHandle<()>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || loop {
-            let job = receiver.lock().expect("Error encountered while executing a previous job; Stopping execution.").recv().unwrap();
+            match receiver.lock().expect("Error encountered while executing a previous job; Stopping execution.").recv() {
+                Ok(job) => {
+                    println!("Worker {id} got a job; executing.");
 
-            println!("Worker {id} got a job; executing.");
-
-            job();
+                    job();
+                }
+                Err(_) => {
+                    println!("Worker {id} got disconnected; shutting down.");
+                    break;
+                }
+            }
         });
 
-        Worker { id, thread }
+        Worker { id, thread: Some(thread) }
     }
 }
 
